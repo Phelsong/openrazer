@@ -182,7 +182,7 @@ static void wolverine_irq(struct urb *urb)
 
 
     /* Process gamepad input packets (20 bytes, header: 00 14) -- 8k poll? */
-    if (wv->data_size == 20 && data[0] == 0x00 && data[1] == 0x14) {
+    if (urb->actual_length == 20 && data[0] == 0x00 && data[1] == 0x14) {
         wv->last_packet_time = jiffies;
 
         /* If controller wasn't connected, schedule registration work */
@@ -245,7 +245,7 @@ static void wolverine_irq(struct urb *urb)
     }
 
 
-    if (urb->actual_length == 32 && data[0] == 0x02 && data[1] == 0x20) {
+    else if (urb->actual_length == 32 && data[0] == 0x02 && data[1] == 0x20) {
         wv->last_packet_time = jiffies;
 
         /* If controller wasn't connected, schedule registration work */
@@ -589,6 +589,39 @@ static int wolverine_probe(struct usb_interface *intf, const struct usb_device_i
             goto err_free_dma;
         wv->input_registered = true;
         atomic_set(&wv->controller_connected, 1);
+    }
+
+    /* For wireless Xbox dongle, send GIP init command to enable input reporting */
+    if (id->idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
+        /* GIP_CMD_RUMBLE (0x09) with special init payload enables input mode */
+        unsigned char *init_packet = kmalloc(13, GFP_KERNEL);
+        if (init_packet) {
+            init_packet[0] = 0x05;
+            init_packet[1] = 0x20;
+            init_packet[2] = 0x00;
+            init_packet[3] = 0x0F;
+            init_packet[4] = 0x06;
+            init_packet[5] = 0x00;
+            init_packet[6] = 0x00;
+            init_packet[7] = 0x00;
+            init_packet[8] = 0x00;
+            init_packet[9] = 0x00;
+            init_packet[10] = 0x00;
+            init_packet[11] = 0x00;
+            init_packet[12] = 0x00;
+            
+            int ret = usb_control_msg(usbdev,
+                usb_sndctrlpipe(usbdev, 0),
+                0x09,  /* SET_REPORT */
+                USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
+                0x0205,  /* Report ID 5, type Output */
+                0,
+                init_packet, 13,
+                1000);
+            if (ret < 0)
+                dev_warn(&intf->dev, "GIP init command failed: %d (controller may still work)\n", ret);
+            kfree(init_packet);
+        }
     }
 
     /* Submit URB to start receiving data */
