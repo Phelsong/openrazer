@@ -189,6 +189,10 @@ static ssize_t razer_attr_read_device_type(struct device *dev, struct device_att
         device_type = "Razer Nommo Chroma\n";
         break;
 
+    case USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX:
+        device_type = "Razer Wolverine V3 Pro XBOX\n";
+        break;
+
     case USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED:
         device_type = "Razer Wolverine V3 Pro 8K PC (Wired)\n";
         break;
@@ -2141,7 +2145,8 @@ static int razer_setup_input(struct input_dev *input, struct hid_device *hdev)
 
     // Setup Wolverine V3 Pro 8K PC gamepad inputs
     if (usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED ||
-        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) {
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS ||
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
         // Standard gamepad buttons
         __set_bit(BTN_A, input->keybit);
         __set_bit(BTN_B, input->keybit);
@@ -2218,7 +2223,9 @@ static int razer_input_mapping(struct hid_device *hdev, struct hid_input *hi, st
     // For Wolverine V3 Pro 8K PC, ignore HID's default input mappings
     // We handle all input in raw_event
     if (usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED ||
-        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) {
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS ||
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
+
         return -1;
     }
 
@@ -2309,6 +2316,7 @@ static int razer_accessory_probe(struct hid_device *hdev, const struct hid_devic
         expected_protocol = USB_INTERFACE_PROTOCOL_KEYBOARD;
         break;
 
+    case USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX:
     case USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED:
     case USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS:
         expected_protocol = 2;  // HID Boot Protocol for Keyboard
@@ -2325,7 +2333,8 @@ static int razer_accessory_probe(struct hid_device *hdev, const struct hid_devic
 
         // Wolverine V3 Pro 8K PC doesn't have controllable LEDs via HID
         if (usb_dev->descriptor.idProduct != USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED &&
-            usb_dev->descriptor.idProduct != USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) {
+            usb_dev->descriptor.idProduct != USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS &&
+            usb_dev->descriptor.idProduct != USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_matrix_custom_frame);               // Custom effect frame
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_matrix_effect_none);                // No effect
             CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_matrix_effect_static);              // Static effect
@@ -2731,7 +2740,8 @@ static int razer_raw_event(struct hid_device *hdev, struct hid_report *report, u
 
     // Debug: print ALL raw events for Wolverine
     if (usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED ||
-        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) {
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS ||
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
         printk(KERN_INFO "razer: raw_event size=%d", size);
         if (size > 0 && size <= 20) {
             int i;
@@ -2745,7 +2755,8 @@ static int razer_raw_event(struct hid_device *hdev, struct hid_report *report, u
 
     // Handle Wolverine V3 Pro 8K PC input reports
     if (usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED ||
-        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) {
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS ||
+        usb_dev->descriptor.idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) {
         if (size == 20 && data[0] == 0x00 && data[1] == 0x14) {
             // Special Razer buttons use multi-bit patterns in data[2]:
             // 0x05 = Razer logo/power button (bits 0+2: would be Down+Left)
@@ -2846,6 +2857,7 @@ static const struct hid_device_id razer_devices[] = {
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_CHROMA_BASE) },
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_NOMMO_PRO) },
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_NOMMO_CHROMA) },
+    { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) },
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED) },
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) },
     { HID_USB_DEVICE(USB_VENDOR_ID_RAZER,USB_DEVICE_ID_RAZER_KRAKEN_KITTY_EDITION) },
