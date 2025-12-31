@@ -1,4 +1,5 @@
 pylib/docs/_build
+pkg/*
 
 # pytest caches
 .pytest_cache/

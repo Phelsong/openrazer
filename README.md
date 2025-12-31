@@ -277,6 +277,7 @@ The devices below are fully feature supported by OpenRazer, which means all avai
 | Razer Tartarus V2                                             |  1532:022B  |
 | Razer Nommo Chroma                                            |  1532:0517  |
 | Razer Nommo Pro                                               |  1532:0518  |
+| Razer Wolverine V3 Pro for Xbox                               |  1532:0A3F  |
 | Razer Wolverine V3 Pro 8K PC (Wired)                          |  1532:0A57  |
 | Razer Wolverine V3 Pro 8K PC (Wireless)                       |  1532:0A59  |
 | Razer Chroma Mug Holder                                       |  1532:0F07  |

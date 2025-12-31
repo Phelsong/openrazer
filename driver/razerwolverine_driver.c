@@ -31,9 +31,25 @@ MODULE_LICENSE("GPL v2");
 MODULE_SOFTDEP("pre: xpad");
 
 /*
+ * Module parameters
+ */
+static bool param_disable_deadzones = false;
+module_param_named(disable_deadzones, param_disable_deadzones, bool, 0444);
+MODULE_PARM_DESC(disable_deadzones,
+                 "Disable dead zone handling for raw processing by Wine/Proton. "
+                 "0: enable deadzones (default), 1: disable deadzones.");
+
+static bool param_debug_packets = false;
+module_param_named(debug_packets, param_debug_packets, bool, 0644);
+MODULE_PARM_DESC(debug_packets,
+                 "Enable continuous logging of all raw USB packet data. "
+                 "0: disabled (default), 1: log all packets.");
+
+/*
  * USB device ID table
  */
 static const struct usb_device_id wolverine_table[] = {
+    { USB_DEVICE(USB_VENDOR_ID_RAZER, USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX) },
     { USB_DEVICE(USB_VENDOR_ID_RAZER, USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED) },
     { USB_DEVICE(USB_VENDOR_ID_RAZER, USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRELESS) },
     { }
@@ -141,7 +157,31 @@ static void wolverine_irq(struct urb *urb)
         goto resubmit;
     }
 
-    /* Process gamepad input packets (20 bytes, header: 00 14) */
+    /* Debug: Log all raw USB packets if enabled via module parameter */
+    if (param_debug_packets) {
+        char hex[256];
+        int pos = 0, i;
+        int len = urb->actual_length;
+
+        /* Log full packet data in chunks if needed */
+        for (i = 0; i < len; i++) {
+            if (pos >= 240 || (i > 0 && i % 32 == 0)) {
+                /* Flush current buffer and start new line */
+                dev_info(&wv->intf->dev, "RAW USB [%d bytes] offset %d: %s\n",
+                         urb->actual_length, i - (pos / 3), hex);
+                pos = 0;
+            }
+            pos += snprintf(hex + pos, 256 - pos, "%02x ", data[i]);
+        }
+        /* Log remaining data */
+        if (pos > 0) {
+            dev_info(&wv->intf->dev, "RAW USB [%d bytes] offset %d: %s\n",
+                     urb->actual_length, i - (pos / 3), hex);
+        }
+    }
+
+
+    /* Process gamepad input packets (20 bytes, header: 00 14) -- 8k poll? */
     if (wv->data_size == 20 && data[0] == 0x00 && data[1] == 0x14) {
         wv->last_packet_time = jiffies;
 
@@ -197,10 +237,183 @@ static void wolverine_irq(struct urb *urb)
         input_report_abs(input, ABS_RX, (s16)(data[10] | (data[11] << 8)));
         input_report_abs(input, ABS_RY, -(s16)(data[12] | (data[13] << 8)));
 
-        /* Triggers */
-        input_report_abs(input, ABS_Z, data[4]);
-        input_report_abs(input, ABS_RZ, data[5]);
+        /* Triggers (8-bit in PC mode, scale to 10-bit) */
+        input_report_abs(input, ABS_Z, data[4] << 2);
+        input_report_abs(input, ABS_RZ, data[5] << 2);
 
+        input_sync(input);
+    }
+
+
+    if (urb->actual_length == 32 && data[0] == 0x02 && data[1] == 0x20) {
+        wv->last_packet_time = jiffies;
+
+        /* If controller wasn't connected, schedule registration work */
+        if (!atomic_read(&wv->controller_connected)) {
+            atomic_set(&wv->controller_connected, 1);
+            schedule_work(&wv->connect_work);
+        }
+
+        /* Only process input if device is registered */
+        if (!wv->input_registered)
+            goto resubmit;
+
+        input = wv->input;
+
+        /* Menu/view buttons (start/select) */
+        input_report_key(input, BTN_START, data[4] & 0x04);
+        input_report_key(input, BTN_SELECT, data[4] & 0x08);
+
+        /* Face buttons A, B, X, Y */
+        input_report_key(input, BTN_A, data[4] & 0x10);
+        input_report_key(input, BTN_B, data[4] & 0x20);
+        input_report_key(input, BTN_X, data[4] & 0x40);
+        input_report_key(input, BTN_Y, data[4] & 0x80);
+
+        /* Note: If using GIP over USB (not HID), button layout follows xpadone_process_packet
+         * If this is actually an HID report, buttons would be at different offsets */
+
+        /* HID Report 1: Usually data[15] & 0x10 (byte 15, bit 4) */
+        input_report_key(input, BTN_MODE, data[4] & 0x01);
+
+        /* Alternative: Try data[4] & 0x02 if above doesn't work */
+        /* input_report_key(input, BTN_MODE, data[4] & 0x02); */
+
+        /* Share/Screenshot button - typically separate from main button data */
+        if (urb->actual_length >= 19) {
+            /* For HID reports: Share is at data[16] & 0x01 (report byte offset) */
+            input_report_key(input, BTN_TRIGGER_HAPPY1, data[18] & 0x01);
+        }
+
+        /* Paddle buttons - Elite controller style mapping */
+        if (urb->actual_length >= 21) {
+            /* Based on xpadneo: paddles reported in separate data section */
+            input_report_key(input, BTN_GRIPR, data[18] & 0x02);  /* Right upper paddle */
+            input_report_key(input, BTN_GRIPR2, data[18] & 0x04); /* Right lower paddle */
+            input_report_key(input, BTN_GRIPL, data[18] & 0x08);  /* Left upper paddle */
+            input_report_key(input, BTN_GRIPL2, data[18] & 0x10); /* Left lower paddle */
+        }
+
+        /* D-pad */
+        input_report_key(input, BTN_DPAD_UP, data[5] & 0x01);
+        input_report_key(input, BTN_DPAD_DOWN, data[5] & 0x02);
+        input_report_key(input, BTN_DPAD_LEFT, data[5] & 0x04);
+        input_report_key(input, BTN_DPAD_RIGHT, data[5] & 0x08);
+
+        /* Bumpers (TL/TR) */
+        input_report_key(input, BTN_TL, data[5] & 0x10);
+        input_report_key(input, BTN_TR, data[5] & 0x20);
+
+        /* Thumbstick presses */
+        input_report_key(input, BTN_THUMBL, data[5] & 0x40);
+        input_report_key(input, BTN_THUMBR, data[5] & 0x80);
+
+        /* Triggers (16-bit values, already in 10-bit range 0-1023) */
+        input_report_abs(input, ABS_Z, (__u16)le16_to_cpup((__le16 *)(data + 6)));
+        input_report_abs(input, ABS_RZ, (__u16)le16_to_cpup((__le16 *)(data + 8)));
+
+        /* Left stick */
+        input_report_abs(input, ABS_X, (__s16)le16_to_cpup((__le16 *)(data + 10)));
+        input_report_abs(input, ABS_Y, ~(__s16)le16_to_cpup((__le16 *)(data + 12)));
+
+        /* Right stick */
+        input_report_abs(input, ABS_RX, (__s16)le16_to_cpup((__le16 *)(data + 14)));
+        input_report_abs(input, ABS_RY, ~(__s16)le16_to_cpup((__le16 *)(data + 16)));
+
+        input_sync(input);
+    }
+
+    /* Process wireless mode gamepad packets (36 bytes, GIP_CMD_INPUT: 20) */
+    else if (urb->actual_length == 36 && data[0] == 0x20) {
+        wv->last_packet_time = jiffies;
+
+        /* If controller wasn't connected, schedule registration work */
+        if (!atomic_read(&wv->controller_connected)) {
+            atomic_set(&wv->controller_connected, 1);
+            schedule_work(&wv->connect_work);
+        }
+
+        /* Only process input if device is registered */
+        if (!wv->input_registered)
+            goto resubmit;
+
+        input = wv->input;
+
+        /* Menu/view buttons (start/select) */
+        input_report_key(input, BTN_START, data[4] & 0x04);
+        input_report_key(input, BTN_SELECT, data[4] & 0x08);
+
+        /* Face buttons A, B, X, Y */
+        input_report_key(input, BTN_A, data[4] & 0x10);
+        input_report_key(input, BTN_B, data[4] & 0x20);
+        input_report_key(input, BTN_X, data[4] & 0x40);
+        input_report_key(input, BTN_Y, data[4] & 0x80);
+
+        /* Note: If using GIP over USB (not HID), button layout follows xpadone_process_packet
+         * If this is actually an HID report, buttons would be at different offsets */
+
+        /* HID Report 1: Usually data[15] & 0x10 (byte 15, bit 4) */
+        input_report_key(input, BTN_MODE, data[4] & 0x01);
+
+        /* Alternative: Try data[4] & 0x02 if above doesn't work */
+        /* input_report_key(input, BTN_MODE, data[4] & 0x02); */
+
+        /* Share/Screenshot button - typically separate from main button data */
+        /* DISABLED: Extended buttons produce identical packets, can't differentiate
+        if (urb->actual_length >= 19) {
+            input_report_key(input, BTN_TRIGGER_HAPPY1, data[18] & 0x01);
+        }
+        */
+
+        /* Paddle buttons - Elite controller style mapping */
+        /* DISABLED: Extended buttons produce identical packets, can't differentiate
+        if (urb->actual_length >= 21) {
+            input_report_key(input, BTN_GRIPR, data[18] & 0x02);
+            input_report_key(input, BTN_GRIPR2, data[18] & 0x04);
+            input_report_key(input, BTN_GRIPL, data[18] & 0x08);
+            input_report_key(input, BTN_GRIPL2, data[18] & 0x10);
+        }
+        */
+
+        /* D-pad */
+        input_report_key(input, BTN_DPAD_UP, data[5] & 0x01);
+        input_report_key(input, BTN_DPAD_DOWN, data[5] & 0x02);
+        input_report_key(input, BTN_DPAD_LEFT, data[5] & 0x04);
+        input_report_key(input, BTN_DPAD_RIGHT, data[5] & 0x08);
+
+        /* Bumpers (TL/TR) */
+        input_report_key(input, BTN_TL, data[5] & 0x10);
+        input_report_key(input, BTN_TR, data[5] & 0x20);
+
+        /* Thumbstick presses */
+        input_report_key(input, BTN_THUMBL, data[5] & 0x40);
+        input_report_key(input, BTN_THUMBR, data[5] & 0x80);
+
+        /* Triggers (16-bit values, already in 10-bit range 0-1023) */
+        input_report_abs(input, ABS_Z, (__u16)le16_to_cpup((__le16 *)(data + 6)));
+        input_report_abs(input, ABS_RZ, (__u16)le16_to_cpup((__le16 *)(data + 8)));
+
+        /* Left stick */
+        input_report_abs(input, ABS_X, (__s16)le16_to_cpup((__le16 *)(data + 10)));
+        input_report_abs(input, ABS_Y, ~(__s16)le16_to_cpup((__le16 *)(data + 12)));
+
+        /* Right stick */
+        input_report_abs(input, ABS_RX, (__s16)le16_to_cpup((__le16 *)(data + 14)));
+        input_report_abs(input, ABS_RY, ~(__s16)le16_to_cpup((__le16 *)(data + 16)));
+
+        input_sync(input);
+    }
+    /* Process Xbox Guide button packets (6 bytes, header: 07 20) */
+    else if (urb->actual_length == 6 && data[0] == 0x07 && data[1] == 0x20) {
+        wv->last_packet_time = jiffies;
+
+        /* Only process input if device is registered */
+        if (!wv->input_registered)
+            goto resubmit;
+
+        input = wv->input;
+
+        input_report_key(input, BTN_MODE, data[4] & 0x01);
         input_sync(input);
     }
 
@@ -238,7 +451,13 @@ static int wolverine_setup_input(struct wolverine_device *wv)
     input_set_capability(input, EV_KEY, BTN_DPAD_LEFT);
     input_set_capability(input, EV_KEY, BTN_DPAD_RIGHT);
 
-    /* Razer-specific buttons */
+    /* Paddle buttons (back buttons) */
+    input_set_capability(input, EV_KEY, BTN_GRIPL);
+    input_set_capability(input, EV_KEY, BTN_GRIPR);
+    input_set_capability(input, EV_KEY, BTN_GRIPL2);
+    input_set_capability(input, EV_KEY, BTN_GRIPR2);
+
+    /* Razer-specific buttons (screenshot/share) */
     input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY1);
     input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY2);
     input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY3);
@@ -248,13 +467,16 @@ static int wolverine_setup_input(struct wolverine_device *wv)
     input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY7);
     input_set_capability(input, EV_KEY, BTN_TRIGGER_HAPPY8);
 
-    /* Analog axes */
-    input_set_abs_params(input, ABS_X, -32768, 32767, 16, 128);
-    input_set_abs_params(input, ABS_Y, -32768, 32767, 16, 128);
-    input_set_abs_params(input, ABS_RX, -32768, 32767, 16, 128);
-    input_set_abs_params(input, ABS_RY, -32768, 32767, 16, 128);
-    input_set_abs_params(input, ABS_Z, 0, 255, 0, 0);
-    input_set_abs_params(input, ABS_RZ, 0, 255, 0, 0);
+    /* Analog axes - matching xpadneo's configuration */
+    int deadzone = param_disable_deadzones ? 0 : 3072;
+
+    input_set_abs_params(input, ABS_X, -32768, 32767, 32, deadzone);
+    input_set_abs_params(input, ABS_Y, -32768, 32767, 32, deadzone);
+    input_set_abs_params(input, ABS_RX, -32768, 32767, 32, deadzone);
+    input_set_abs_params(input, ABS_RY, -32768, 32767, 32, deadzone);
+    /* Triggers: 10-bit precision (0-1023) like xpadneo */
+    input_set_abs_params(input, ABS_Z, 0, 1023, 4, 0);
+    input_set_abs_params(input, ABS_RZ, 0, 1023, 4, 0);
 
     return 0;
 }
@@ -342,7 +564,7 @@ static int wolverine_probe(struct usb_interface *intf, const struct usb_device_i
     }
 
     /* Allocate DMA buffer for input data */
-    wv->data_size = 20;
+    wv->data_size = 64;  /* Increased to handle all packet types */
     wv->data = usb_alloc_coherent(usbdev, wv->data_size, GFP_KERNEL, &wv->data_dma);
     if (!wv->data) {
         error = -ENOMEM;
@@ -357,9 +579,10 @@ static int wolverine_probe(struct usb_interface *intf, const struct usb_device_i
     wv->irq->transfer_dma = wv->data_dma;
     wv->irq->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
-    /* For wired mode (0x0A57), register input device immediately since
-     * the controller is always connected when the cable is plugged in.
-     * For wireless mode (0x0A59), defer registration until we receive data. */
+    /* For wired mode (0x0A57 PC), register input device immediately
+     * since the controller is always connected when the cable is plugged in.
+     * For wireless modes (0x0A3F dongle, 0x0A59 PC dongle), defer registration until we receive data.
+     * Note: 0x0A3F can be either wired or wireless - we can't distinguish until we see if data arrives. */
     if (id->idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED) {
         error = input_register_device(input);
         if (error)
@@ -377,7 +600,9 @@ static int wolverine_probe(struct usb_interface *intf, const struct usb_device_i
 
     usb_set_intfdata(intf, wv);
 
-    if (id->idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED)
+    if (id->idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_XBOX)
+        dev_info(&intf->dev, "Razer Wolverine V3 Pro for Xbox ready\n");
+    else if (id->idProduct == USB_DEVICE_ID_RAZER_WOLVERINE_V3_PRO_WIRED)
         dev_info(&intf->dev, "Razer Wolverine V3 Pro 8K PC connected (wired)\n");
     else
         dev_info(&intf->dev, "Razer Wolverine V3 Pro 8K PC dongle ready\n");
